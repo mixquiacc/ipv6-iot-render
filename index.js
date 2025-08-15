@@ -27,7 +27,7 @@ const server = http.createServer(app);
 // WebSocket para ingestión desde el ESP32
 const wss = new WebSocketServer({ server, path: '/ingest' });
 
-// Socket.IO para enviar al frontend en tiempo real
+// Socket.IO para el frontend en tiempo real
 const io = new Server(server);
 
 async function broadcastSample(sample) {
@@ -48,19 +48,39 @@ wss.on('connection', (ws, req) => {
   const device = urlObj.searchParams.get('device') || 'unknown';
 
   ws.on('message', async (data) => {
+    const raw = data.toString();
+    let msg;
+
+    // 1) Intenta parsear normal
     try {
-      const msg = JSON.parse(data.toString());
-      const sample = {
-        device,
-        ts: msg.ts || Date.now(),
-        temperature: msg.temperature,
-        humidity: msg.humidity,
-        airQuality: msg.airQuality
-      };
+      msg = JSON.parse(raw);
+    } catch {
+      // 2) Si falla, convierte 'NaN'/'nan' a null y vuelve a intentar
+      const cleaned = raw.replace(/\bNaN\b/gi, 'null').replace(/\bnan\b/gi, 'null');
+      try { msg = JSON.parse(cleaned); }
+      catch {
+        console.warn('Invalid JSON dropped:', raw.slice(0, 120));
+        return;
+      }
+    }
+
+    // Normaliza numéricos
+    const sample = {
+      device,
+      ts: Number.isFinite(msg.ts) ? msg.ts : Date.now(),
+      temperature: Number.isFinite(msg.temperature) ? msg.temperature : null,
+      humidity: Number.isFinite(msg.humidity) ? msg.humidity : null,
+      airQuality: Number.isFinite(msg.airQuality) ? msg.airQuality : null
+    };
+
+    // Sin T/H válidos no guardamos (evita ensuciar la DB)
+    if (sample.temperature === null || sample.humidity === null) return;
+
+    try {
       await db.insert(sample);
       await broadcastSample(sample);
     } catch (e) {
-      console.error('Invalid message:', e.message);
+      console.error('DB insert error:', e.message);
     }
   });
 });
